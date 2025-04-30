@@ -136,9 +136,9 @@ To add CSS classes to the element after the request completes.
 ```
 
 ## Content to Create Quiz Questions From:
-
+--- START_OF_CONTENT ---
 [CONTENT_PLACEHOLDER]
-
+--- END_OF_CONTENT ---
 ## Additional Guidelines
 
 1.  **Balance of Question Types**:
