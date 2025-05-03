@@ -290,6 +290,337 @@ def parse_quiz_xml_to_dataframe(xml_content, chapter_no=None, chapter_title=None
     return df
 
 
+
+def parse_codebase_quiz_xml_to_dataframe(xml_content):
+    """
+    Parse XML quiz content based on the 'codebase_flavor' prompt format
+    and convert it to a pandas DataFrame.
+    Enforces that each QUIZ_ITEM must contain exactly 5 OPTION elements
+    (OPTION1-OPTION5) and expects a PATH element. Handles case-insensitivity.
+
+    Args:
+        xml_content (str): XML string containing quiz questions in the
+                           codebase flavor format (includes <PATH>).
+
+    Returns:
+        pd.DataFrame: DataFrame with columns: 'text', 'options', 'answerIndex',
+                      'topic', 'tag', 'path'.
+                      Returns an empty DataFrame if parsing fails completely or input is empty.
+    """
+    # Define expected columns early for consistent empty DataFrame returns
+    expected_cols = [
+        "text",
+        "options",
+        "answerIndex",
+        "topic",
+        "tag",
+        "path",
+    ]
+
+    # --- FIX: Check for empty/whitespace input *before* parsing ---
+    if not xml_content or xml_content.isspace():
+         print("Warning: Input XML content was empty or contained only whitespace.")
+         return pd.DataFrame(columns=expected_cols)
+    # --- END FIX ---
+
+    # Clean up potential XML issues (prolog, surrounding text)
+    # Be careful not to remove the entire content if it's just the QUIZ_BANK
+    cleaned_content = re.sub(r"^.*?<QUIZ_BANK", "<QUIZ_BANK", xml_content, flags=re.DOTALL | re.IGNORECASE)
+    cleaned_content = re.sub(r"</QUIZ_BANK>.*?$", "</QUIZ_BANK>", cleaned_content, flags=re.DOTALL | re.IGNORECASE)
+    # Remove XML declaration which can sometimes interfere with lxml fragment parsing
+    cleaned_content = re.sub(r"<\?xml.*?\?>", "", cleaned_content).strip()
+
+    # --- FIX: Add another check here in case cleaning resulted in an empty string ---
+    if not cleaned_content:
+         print("Warning: Input XML content became empty after cleaning.")
+         return pd.DataFrame(columns=expected_cols)
+    # --- END FIX ---
+
+    # Parse the XML using lxml for robustness
+    root = None # Initialize root
+    parser = None # Initialize parser
+    try:
+        # Use encoding='utf-8' and recover=True
+        # recover=True is essential for handling slightly malformed XML
+        parser = etree.XMLParser(recover=True, encoding="utf-8")
+        # Encoding the string to bytes first is crucial for the parser's encoding declaration
+        root = etree.fromstring(cleaned_content.encode("utf-8"), parser=parser)
+
+        # Basic validation after parsing (case-insensitive check for QUIZ_BANK)
+        if root is None or not re.fullmatch("QUIZ_BANK", root.tag, re.IGNORECASE):
+             # If recovery wrapped it, try finding the actual QUIZ_BANK node
+             potential_root = root.xpath('//*[re:match(local-name(), "^QUIZ_BANK$", "i")]',
+                                         namespaces={"re": "http://exslt.org/regular-expressions"})
+             if potential_root:
+                 root = potential_root[0]
+             else:
+                # Log parser errors if available
+                if parser and parser.error_log:
+                    print(f"Parser errors logged: {parser.error_log}")
+                raise ValueError(
+                    "Root <QUIZ_BANK> element not found or invalid after parsing and recovery attempts."
+                )
+
+    except etree.XMLSyntaxError as e:
+        # Catch specific XML syntax errors from lxml
+        print(f"Fatal XML Syntax Error: {e}")
+        # Log parser errors if available and not already printed
+        if parser and parser.error_log:
+             # Check if the error message is already the main exception message
+            if str(e) not in str(parser.error_log):
+                print(f"Parser errors: {parser.error_log}")
+        return pd.DataFrame(columns=expected_cols) # Return empty DF
+    except Exception as e:
+        # Catch other potential errors during parsing setup or execution
+        print(f"Fatal parsing setup error: {e.__class__.__name__}: {e}")
+        # Log parser errors if available
+        if parser and hasattr(parser, 'error_log') and parser.error_log:
+            print(f"Parser errors: {getattr(parser, 'error_log', 'Unknown')}")
+        return pd.DataFrame(columns=expected_cols) # Return empty DF
+
+    # Prepare data structure
+    quiz_data = []
+    skipped_count = 0
+
+    # Find all QUIZ_ITEM elements (case-insensitive using XPath translate)
+    quiz_items = root.xpath(
+        './/*[translate(local-name(), "quiz_item", "QUIZ_ITEM") = "QUIZ_ITEM"]'
+    )
+
+    # Extract main topic if available (case-insensitive attribute lookup using loop)
+    main_topic = ""
+    if root is not None: # Check if root was successfully assigned
+        for key in root.attrib:
+            if key.lower() == "topic":
+                main_topic = root.attrib[key]
+                break
+
+    # --- Process each QUIZ_ITEM ---
+    for item_index, item in enumerate(quiz_items):
+        question_snippet = "[Question identification failed]"  # Default snippet for logging
+        try:
+            # --- Extract QUESTION (mandatory, case-insensitive) ---
+            question_element = item.xpath(
+                './*[translate(local-name(), "question", "QUESTION") = "QUESTION"]'
+            )
+            if not question_element:
+                print(
+                    f"Warning: QUIZ_ITEM index {item_index} has no QUESTION element. Skipping."
+                )
+                skipped_count += 1
+                continue
+            question_element = question_element[0] # Take the first match
+
+            # Convert question element to string including all children/HTML tags
+            # Using method='html' helps preserve nested tags better
+            question_html = etree.tostring(
+                question_element, encoding="unicode", method="html"
+            )
+            # Extract content *within* the <QUESTION> tags (case-insensitive, non-greedy)
+            question_match = re.search(
+                r"<question\b[^>]*>(.*?)</question>",
+                question_html,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if question_match:
+                question = question_match.group(1).strip()
+            else: # Fallback using itertext, then inner HTML
+                print(
+                    f"Warning: Could not extract question content via regex for item {item_index}. Falling back."
+                )
+                question = "".join(question_element.itertext()).strip()
+                if not question: # Last resort, capture raw inner HTML
+                    question = "".join(
+                        etree.tostring(child, encoding="unicode", method="html")
+                        for child in question_element
+                    ).strip()
+
+            if not question: # If question is still empty after all attempts
+                 print(
+                    f"Warning: QUIZ_ITEM index {item_index} contains an empty QUESTION element. Skipping."
+                )
+                 skipped_count += 1
+                 continue
+
+            question_snippet = question[:70].strip() # Update snippet for logging
+
+            # --- Validate Exactly 5 Options (OPTION1 to OPTION5, case-insensitive) ---
+            # Use EXSLT regex match for robustness against case variations (OPTION1, Option1, option1)
+            option_elements_found = item.xpath(
+                './*[re:match(local-name(), "^OPTION[1-5]$", "i")]',
+                namespaces={"re": "http://exslt.org/regular-expressions"},
+            )
+            # Also check for *any* tag starting with OPTION (case-insensitive) to catch extras like OPTION6
+            all_option_tags = item.xpath(
+                './*[starts-with(translate(local-name(), "option", "OPTION"), "OPTION")]'
+            )
+
+            if len(all_option_tags) != 5:
+                print(
+                    f"Error: Expected 5 options but found {len(all_option_tags)} for question '{question_snippet}...'. Skipping this item."
+                )
+                skipped_count += 1
+                continue
+
+            # Verify the 5 tags found are indeed OPTION1 through OPTION5
+            option_numbers_found = set()
+            valid_options_1_to_5 = True
+            for opt_el in option_elements_found:
+                # Extract number from tag name (case-insensitive)
+                match = re.search(r"(\d+)$", opt_el.tag, re.IGNORECASE)
+                if match:
+                    option_numbers_found.add(int(match.group(1)))
+                else:
+                    valid_options_1_to_5 = False
+                    break # Malformed option tag name
+
+            if not valid_options_1_to_5 or option_numbers_found != {1, 2, 3, 4, 5}:
+                found_tags_str = sorted([opt.tag for opt in all_option_tags]) # Show actual tags
+                extracted_nums_str = sorted(list(option_numbers_found))
+                print(
+                    f"Error: Found 5 tags starting with 'OPTION', but not exactly OPTION1-5 "
+                    f"(found tags: {found_tags_str}, extracted numbers: {extracted_nums_str}) "
+                    f"for question '{question_snippet}...'. Skipping item."
+                )
+                skipped_count += 1
+                continue
+            # --- End Option Validation ---
+
+            # --- Extract Options (case-insensitive find, handle HTML) ---
+            options = []
+            correct_index = 1 # Per specification, OPTION1 is always correct
+
+            for i in range(1, 6):
+                # Find OPTIONi case-insensitively (guaranteed to find one by checks above)
+                option_element = item.xpath(
+                    f'./*[re:match(local-name(), "OPTION{i}", "i")]',
+                    namespaces={"re": "http://exslt.org/regular-expressions"},
+                )[0]
+
+                # Convert option element to string including any inner HTML
+                option_html = etree.tostring(
+                    option_element, encoding="unicode", method="html"
+                )
+                tag_name = option_element.tag # Get the actual tag name (e.g., OPTION1, Option1)
+                # Extract content *within* the option tags using the actual tag name
+                option_match = re.search(
+                    rf"<{tag_name}\b[^>]*>(.*?)</{tag_name}>",
+                    option_html,
+                    re.DOTALL | re.IGNORECASE, # Case-insensitive match for tag name
+                )
+
+                if option_match:
+                    option_text = option_match.group(1).strip()
+                else: # Fallback mechanism
+                    print(f"Warning: Option {i} regex extraction failed for item {item_index}. Falling back.")
+                    option_text = "".join(option_element.itertext()).strip()
+                    if not option_text: # Last resort for potentially empty tags with children
+                        option_text = "".join(
+                            etree.tostring(child, encoding="unicode", method="html")
+                            for child in option_element
+                        ).strip()
+                options.append(option_text)
+
+                # Check correct attribute (case-insensitive check of value)
+                correct_attr_val = ""
+                for key in option_element.attrib: # Case-insensitive key lookup
+                    if key.lower() == "correct":
+                         correct_attr_val = option_element.attrib[key]
+                         break
+
+                if i == 1 and correct_attr_val.lower() != "true":
+                    print(
+                        f"Warning: OPTION1 for question '{question_snippet}...' missing or incorrect correct='true' attribute (found: '{correct_attr_val}')."
+                    )
+                elif i > 1 and correct_attr_val.lower() != "false":
+                    print(
+                        f"Warning: OPTION{i} for question '{question_snippet}...' missing or incorrect correct='false' attribute (found: '{correct_attr_val}')."
+                    )
+
+            # --- Extract TOPIC (optional, fallback to main topic, case-insensitive) ---
+            topic_element = item.xpath(
+                './*[translate(local-name(), "topic", "TOPIC") = "TOPIC"]/text()'
+            )
+            topic = "".join(topic_element).strip() if topic_element else main_topic
+
+            # --- Extract TAG (optional, case-insensitive) ---
+            tag_element = item.xpath(
+                './*[translate(local-name(), "tag", "TAG") = "TAG"]/text()'
+            )
+            tag = "".join(tag_element).strip() if tag_element else "" # Default to empty string
+
+            # --- Extract PATH (expected, case-insensitive) ---
+            path_element = item.xpath(
+                './*[translate(local-name(), "path", "PATH") = "PATH"]/text()'
+            )
+            path = "".join(path_element).strip() if path_element else "" # Default to empty string
+            # Add warning if path is missing, as the prompt implies it's required/expected
+            if not path:
+                 print(
+                    f"Warning: QUIZ_ITEM index {item_index} (question '{question_snippet}...') is missing the <PATH> element."
+                )
+
+
+            # --- Append data for this valid item ---
+            quiz_data.append(
+                {
+                    "text": question,
+                    "options": options,
+                    "answerIndex": correct_index,
+                    "topic": topic,
+                    "tag": tag,
+                    "path": path, # Added path column
+                }
+            )
+
+        except Exception as e:
+            # Catch unexpected errors during processing of a single item
+            # Log the type of error and the message
+            print(
+                f"Error processing question '{question_snippet}...': {e.__class__.__name__}: {e}"
+            )
+            import traceback # Optional: include traceback for deeper debugging
+            # print(traceback.format_exc()) # Uncomment for full traceback
+            skipped_count += 1
+            continue # Skip to the next QUIZ_ITEM
+
+    # --- Finalize DataFrame ---
+    df = pd.DataFrame(quiz_data)
+
+    # Print summary statistics
+    # Check if the *original* input was non-empty but no items were found/parsed
+    if not quiz_items and (xml_content and not xml_content.isspace()):
+        print("Warning: No <QUIZ_ITEM> elements found or parsed in the XML content.")
+
+    print(f"Successfully parsed {len(df)} questions.")
+    print(
+        f"Skipped {skipped_count} questions due to errors (e.g., incorrect option count, missing question/options, XML errors)."
+    )
+
+    # Ensure essential columns exist even if df is empty, using predefined list
+    for col in expected_cols:
+        if col not in df.columns:
+            if col == "options":
+                # Ensure the column type is object to hold lists/NAs
+                df[col] = pd.Series([[]] * len(df), dtype=object)
+            elif col == "answerIndex":
+                # Use appropriate NA type for integers if needed, or object
+                df[col] = pd.NA if pd.__version__ >= '1.0' else None
+            else:
+                df[col] = "" # Empty string for text columns
+
+    # Reorder columns to a standard format
+    # Ensure all expected columns are present before reordering
+    present_cols = [col for col in expected_cols if col in df.columns]
+    # If df is empty, create it with the correct columns; otherwise, reorder
+    if df.empty:
+        df = pd.DataFrame(columns=expected_cols)
+    else:
+        df = df[present_cols] # Reorder existing df
+
+    return df
+
+
 # --- enhance_quiz_dataframe function (CORRECTED) ---
 def enhance_quiz_dataframe(
     df,
