@@ -17,10 +17,10 @@ This quiz bank will be automatically parsed and imported into a Django applicati
 
 ## Output Format
 
-Generate multiple-choice questions in the following XML format. The `topic` attribute in `QUIZ_BANK` should reflect the project or main technology being analyzed (e.g., "Django Project X Concepts", "React Component Library Usage").
+Generate multiple-choice questions in the following XML format:
 
 ```xml
-<QUIZ_BANK topic="[Codebase Concept Review: Identify Project/Technology]">
+<QUIZ_BANK>
 
 <QUIZ_ITEM>
 <QUESTION>
@@ -49,7 +49,7 @@ Generate multiple-choice questions in the following XML format. The `topic` attr
 </QUIZ_BANK>
 ```
 
-## Important Requirements (Inherited from Original Template)
+## Important Requirements
 
 1.  **XML Structure**:
     * Use exactly the tags shown: `<QUIZ_BANK>`, `<QUIZ_ITEM>`, `<QUESTION>`, `<OPTION1>`, `<OPTION2>`, `<OPTION3>`, `<OPTION4>`, `<OPTION5>`, `<TOPIC>`, `<TAG>`, and `<PATH>`.

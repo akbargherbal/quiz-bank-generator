@@ -2,6 +2,7 @@ import pandas as pd
 from lxml import etree
 from io import StringIO
 import re
+import xml.etree.ElementTree as ET
 
 
 def parse_quiz_xml_to_dataframe(xml_content, chapter_no=None, chapter_title=None):
